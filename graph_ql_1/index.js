@@ -14,6 +14,8 @@ const Author = require("./models/author");
 const Book = require("./models/book");
 const User = require("./models/user");
 const { GraphQLError } = require("graphql");
+const DataLoader = require('dataloader');
+
 
 const pubsub = new PubSub();
 
@@ -22,6 +24,20 @@ require("dotenv").config();
 const MONGODB_URI = process.env.MONGODB_URI;
 
 console.log("connecting to", MONGODB_URI);
+
+const createBookCountLoader = () => new DataLoader(async (authorIds) => {
+  const counts = await Book.aggregate([
+    { $match: { author: { $in: authorIds } } },
+    { $group: { _id: "$author", count: { $sum: 1 } } },
+  ]);
+
+  const countMap = {};
+  counts.forEach(c => {
+    countMap[c._id.toString()] = c.count;
+  });
+
+  return authorIds.map(id => countMap[id.toString()] || 0);
+});
 
 mongoose
   .connect(MONGODB_URI)
@@ -120,8 +136,8 @@ const resolvers = {
     },
   },
   Author: {
-    bookCount: async (root) => {
-      return await Book.countDocuments({ author: root._id });
+    bookCount: async (root, _args, context) => {
+      return context.bookCountLoader.load(root._id);
     },
   },
   Mutation: {
@@ -260,7 +276,7 @@ async function startServer() {
             });
           }
         }
-        return { pubsub };
+        return { pubsub, bookCountLoader: createBookCountLoader()};
       },
     }),
   );

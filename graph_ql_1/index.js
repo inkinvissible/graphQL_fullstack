@@ -117,41 +117,39 @@ const resolvers = {
     },
   },
   Mutation: {
-    addBook: async (_root, args) => {
+    addBook: async (_root, args, context) => {
       const currentUser = context.currentUser;
 
       if (!currentUser) {
         throw new GraphQLError("not authenticated", {
           extensions: {
-            code: "BAD_USER_INPUT",
+            code: "NOT_AUTHORIZED",
           },
         });
       }
       let author = await Author.findOne({ name: args.author });
-      const book = new Book(args);
-      if (author) {
-        try {
-          const response = await book.save();
-        } catch (e) {
-          throw new GraphQLError("Incorrect user input", {
-            extensions: { code: "BAD_USER_INPUT" },
-          });
-        }
-        return response;
-      } else {
+      if (!author) {
         const newAuthor = new Author({ name: args.author });
         try {
-          const result = await newAuthor.save();
-          const response = await book.save();
+          author = await newAuthor.save();
         } catch (e) {
           throw new GraphQLError("Incorrect user input", {
             extensions: { code: "BAD_USER_INPUT" },
           });
         }
-        return response;
+      }
+      const book = new Book({ ...args, author: author._id });
+      try {
+        const savedBook = await book.save();
+        await savedBook.populate('author');
+        return savedBook;
+      } catch (e) {
+        throw new GraphQLError("Incorrect user input", {
+          extensions: { code: "BAD_USER_INPUT" },
+        });
       }
     },
-    editAuthor: async (_root, args) => {
+    editAuthor: async (_root, args, context) => {
       const currentUser = context.currentUser;
 
       if (!currentUser) {

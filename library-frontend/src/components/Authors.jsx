@@ -34,7 +34,9 @@ const Authors = (props) => {
         </tbody>
       </table>
 
-      <AuthorForm authors={authors} />
+      {/* eslint-disable-next-line react/prop-types */}
+      { props.token &&     
+      <AuthorForm authors={authors} />}
     </div>
   );
 };

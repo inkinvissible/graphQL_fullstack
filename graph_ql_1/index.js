@@ -1,13 +1,21 @@
 const { ApolloServer } = require("@apollo/server");
-const { startStandaloneServer } = require("@apollo/server/standalone");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
-
-mongoose.set("strictQuery", false);
+const { PubSub } = require('graphql-subscriptions');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const { expressMiddleware } = require("@apollo/server/express4");
+const express = require('express');
+const http = require('http');
+const { WebSocketServer } = require('ws');
+const { useServer } = require('graphql-ws/lib/use/ws');
+const { makeExecutableSchema } = require('@graphql-tools/schema');
 const Author = require("./models/author");
 const Book = require("./models/book");
 const User = require("./models/user");
 const { GraphQLError } = require("graphql");
+
+const pubsub = new PubSub();
 
 require("dotenv").config();
 
@@ -25,58 +33,58 @@ mongoose
   });
 
 const typeDefs = `
+  type Mutation {
+    addBook (
+      title: String!
+      published: Int!
+      author: String!
+      genres: [String!]!
+    ) : Book
 
-	type Mutation {
-		addBook (
-			title: String!
-			published: Int!
-			author: String!
-			genres: [String!]!
-		) : Book
-
-		editAuthor(
-		name: String!
-		setBornTo: Int
-		) : Author
+    editAuthor(
+      name: String!
+      setBornTo: Int
+    ) : Author
 
     createUser(
-    username: String!
-    favoriteGenre: String!
-  ): User
+      username: String!
+      favoriteGenre: String!
+    ): User
 
-  login(
-    username: String!
-    password: String!
-  ): Token
-	}
+    login(
+      username: String!
+      password: String!
+    ): Token
+  }
 
-type User {
+  type User {
     username: String!
     favoriteGenre: String!
     id: ID!
-}
-
-type Token {
-  value: String!
-}
-
-
-  type Book {
-		id: ID!
-		title: String!
-		published: Int!
-		author: Author!
-		genres: [String!]!
   }
 
+  type Token {
+    value: String!
+  }
 
-	type Author {
-		name: String!
-		id: ID!
-		born: Int
-		bookCount: Int!
-	}
+  type Book {
+    id: ID!
+    title: String!
+    published: Int!
+    author: Author!
+    genres: [String!]!
+  }
 
+  type Author {
+    name: String!
+    id: ID!
+    born: Int
+    bookCount: Int!
+  }
+
+  type Subscription {
+    bookAdded: Book!
+  }
 
   type Query {
     authorCount: Int!
@@ -141,9 +149,12 @@ const resolvers = {
       const book = new Book({ ...args, author: author._id });
       try {
         const savedBook = await book.save();
-        await savedBook.populate('author');
+        const populatedBook = await savedBook.populate('author');
+        console.log('Publicando BOOK_ADDED:', populatedBook);
+        pubsub.publish('BOOK_ADDED', { bookAdded: populatedBook });
         return savedBook;
       } catch (e) {
+        console.error('Error al guardar el libro:', e);
         throw new GraphQLError("Incorrect user input", {
           extensions: { code: "BAD_USER_INPUT" },
         });
@@ -167,7 +178,8 @@ const resolvers = {
       const authorUpdated = { ...authorToUpdate.toObject(), born: bornDate };
       const response = await Author.findByIdAndUpdate(
         authorToUpdate._id,
-        authorUpdated
+        authorUpdated,
+        { new: true }
       );
       return response;
     },
@@ -205,25 +217,87 @@ const resolvers = {
       return { value: jwt.sign(userForToken, process.env.SECRET) };
     },
   },
+  Subscription: {
+    bookAdded: {
+      subscribe: (parent, args, context) => {
+        console.log('Suscripción a BOOK_ADDED iniciada');
+        return pubsub.asyncIterableIterator(['BOOK_ADDED'])
+        
+      }
+    }
+  }
 };
 
+// Create executable schema
+const schema = makeExecutableSchema({ typeDefs, resolvers });
+
 const server = new ApolloServer({
-  typeDefs,
-  resolvers,
+  schema,
 });
 
-startStandaloneServer(server, {
-  listen: { port: 4000 },
-  context: async ({ req, res }) => {
-    const auth = req ? req.headers.authorization : null;
-    if (auth && auth.startsWith("Bearer ")) {
-      const decodedToken = jwt.verify(auth.substring(7), process.env.SECRET);
-      const currentUser = await User.findById(decodedToken.id).populate(
-        "favoriteGenre"
-      );
-      return { currentUser };
-    }
-  },
-}).then(({ url }) => {
-  console.log(`Server ready at ${url}`);
-});
+async function startServer() {
+  await server.start();
+
+  const app = express();
+  app.use(cors());
+  app.use(bodyParser.json());
+
+  app.use(
+    '/graphql',
+    expressMiddleware(server, {
+      context: async ({ req }) => {
+        const auth = req.headers.authorization || '';
+        if (auth.startsWith("Bearer ")) {
+          try {
+            const decodedToken = jwt.verify(auth.substring(7), process.env.SECRET);
+            const currentUser = await User.findById(decodedToken.id).populate("favoriteGenre");
+            return { currentUser, pubsub };
+          } catch (error) {
+            throw new GraphQLError("Invalid or expired token", {
+              extensions: {
+                code: "UNAUTHENTICATED",
+              },
+            });
+          }
+        }
+        return { pubsub };
+      },
+    }),
+  );
+
+  const httpServer = http.createServer(app);
+
+  // Set up WebSocket server
+  const wsServer = new WebSocketServer({
+    server: httpServer,
+    path: '/graphql',
+  });
+
+  // Integrate graphql-ws with the WebSocket server
+  useServer({
+    schema,
+    context: async (ctx, msg, args) => {
+      const auth = ctx.connectionParams.authorization || '';
+      if (auth.startsWith("Bearer ")) {
+        try {
+          const decodedToken = jwt.verify(auth.substring(7), process.env.SECRET);
+          const currentUser = await User.findById(decodedToken.id).populate("favoriteGenre");
+          return { currentUser, pubsub };
+        } catch (error) {
+          console.error('Error en contexto de WebSocket:', error);
+          throw new GraphQLError("Invalid or expired token", {
+            extensions: { code: "UNAUTHENTICATED" },
+          });
+        }
+      }
+      return { pubsub };
+    },
+  }, wsServer);
+
+  httpServer.listen(4000, () => {
+    console.log(`Server ready at http://localhost:4000/graphql`);
+    console.log(`Subscriptions ready at ws://localhost:4000/graphql`);
+  });
+}
+
+startServer();

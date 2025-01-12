@@ -1,25 +1,42 @@
-import { useQuery } from "@apollo/client";
-import { ALL_BOOKS, ALL_BOOKS_GENRE } from "../queries";
+import { useQuery, useSubscription } from "@apollo/client";
+import { ALL_BOOKS, BOOK_ADDED, ALL_BOOKS_GENRE } from "../queries";
 import { useState } from "react";
 
 const Books = (props) => {
-  const result = useQuery(ALL_BOOKS);
+  const { data, loading } = useQuery(ALL_BOOKS);
   const [genre, setGenre] = useState(null);
-  
+
+  useSubscription(BOOK_ADDED, {
+    onSubscriptionData: ({ client, subscriptionData }) => {
+      if (!subscriptionData.data) return;
+      const addedBook = subscriptionData.data.bookAdded;
+      const includedIn = (set, object) =>
+        set.map((p) => p.id).includes(object.id);
+      alert(`${addedBook.title} added`);
+      const dataInStore = client.readQuery({ query: ALL_BOOKS });
+      if (!includedIn(dataInStore.allBooks, addedBook)) {
+        client.writeQuery({
+          query: ALL_BOOKS,
+          data: { allBooks: dataInStore.allBooks.concat(addedBook) },
+        });
+      }
+    },
+  });
+
   const genreResult = useQuery(ALL_BOOKS_GENRE, {
     variables: { genre },
-    skip: !genre 
+    skip: !genre,
   });
 
   if (!props.show) return null;
-  if (result.loading) return <p>Loading...</p>;
+  if (loading) return <p>Loading...</p>;
 
-  let books = result.data.allBooks;
+  let books = data.allBooks;
   if (genreResult.data) {
     books = genreResult.data.allBooks;
   }
 
-  const genres = [...new Set(result.data.allBooks.flatMap(b => b.genres))];
+  const genres = [...new Set(data.allBooks.flatMap((b) => b.genres))];
 
   return (
     <div>
@@ -33,7 +50,7 @@ const Books = (props) => {
             <th>published</th>
           </tr>
           {books.map((a) => (
-            <tr key={a.title}>
+            <tr key={a.id}>
               <td>{a.title}</td>
               <td>{a.author.name}</td>
               <td>{a.published}</td>
@@ -43,7 +60,7 @@ const Books = (props) => {
       </table>
 
       <div>
-        {genres.map(g => (
+        {genres.map((g) => (
           <button key={g} onClick={() => setGenre(g)}>
             {g}
           </button>
